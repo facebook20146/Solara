@@ -651,7 +651,10 @@ const SOURCE_OPTIONS = [
     { value: "netease", label: "网易云音乐" },
     { value: "kuwo", label: "酷我音乐" },
     { value: "joox", label: "JOOX音乐" },
-    { value: "bilibili", label: "哔哩哔哩" }
+    { value: "bilibili", label: "哔哩哔哩" },
+    { value: "apple", label: "Apple Music" },
+    { value: "spotify", label: "Spotify" },
+    { value: "qobuz", label: "Qobuz" }
 ];
 
 function normalizeSource(value) {
