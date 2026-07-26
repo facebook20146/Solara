@@ -11,7 +11,7 @@
 const { Router } = require('express');
 const cache = require('../cache');
 
-const API_BASE_URL = process.env.API_BASE_URL || 'https://music-api.gdstudio.xyz/api.php';
+const API_BASE_URL = process.env.API_BASE_URL || 'https://music.gdstudio.xyz/api.php';
 const KUWO_HOST_PATTERN = /(^|\.)kuwo\.cn$/i;
 
 const SAFE_RESPONSE_HEADERS = [
