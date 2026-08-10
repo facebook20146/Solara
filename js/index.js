@@ -772,6 +772,7 @@ const savedCurrentPlaylist = (() => {
 // API配置 - 修复API地址和请求方式
 // API配置 - 适配 QQ 音乐浏览器直连 (绕过 Worker 防火墙拦截)
 // API配置 - 适配 QQ 音乐浏览器直连 (完美修复 MP3 播放与 JSON 解析)
+// API配置 - 完美适配 QQ 音乐直连与 MP3 音频解析
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
 const API = {
@@ -782,6 +783,29 @@ const API = {
     },
 
     fetchJson: async (url) => {
+        // 1. 如果是 data: 伪协议（如内嵌歌词/音频 JSON），直接本地解码解析
+        if (typeof url === "string" && url.startsWith("data:application/json")) {
+            try {
+                const jsonStr = decodeURIComponent(url.split(",")[1] || "");
+                return JSON.parse(jsonStr);
+            } catch (e) {
+                console.error("Data URI parse error:", e);
+                return {};
+            }
+        }
+
+        // 2. 核心修复：如果 url 本身就是 MP3/音频直链，不发起 fetch 字节请求，直接包装返回
+        if (typeof url === "string" && (
+            url.includes(".mp3") || 
+            url.includes("qqmusic") || 
+            url.includes("tc.qq.com") || 
+            url.includes("stream.qqmusic") ||
+            (!url.includes("/proxy") && !url.includes("jkapi.com") && url.startsWith("http"))
+        )) {
+            return { url: url, br: 320 };
+        }
+
+        // 3. 正常 API 请求流程
         try {
             const response = await fetch(url, {
                 headers: {
@@ -942,8 +966,7 @@ const API = {
 
     getSongUrl: (song, quality = "320") => {
         if (song.source === "qq" && song._directUrl) {
-            const json = JSON.stringify({ url: song._directUrl, br: 320 });
-            return "data:application/json;charset=utf-8," + encodeURIComponent(json);
+            return song._directUrl;
         }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=url&id=${song.id}&source=${song.source || "netease"}&br=${quality}&s=${signature}`;
