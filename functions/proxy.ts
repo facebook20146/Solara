@@ -7,7 +7,8 @@ const YAOHUD_API_KEY = "Z2mDyU4rUTUEBbPYdbK";
 const YAOHUD_SECRET_KEY = "75da5a53198ed28ece7d1d4e9cf381d1";
 
 /**
- * HMAC-SHA256 加密签名算法 (严格匹配 PHP hash_hmac('sha256', $signString, $secretKey))
+ * 官方标准 HMAC-SHA256 签名算法
+ * 严格对齐 PHP: hash_hmac('sha256', "key={$apiKey}&timestamp={$timestamp}", $secretKey)
  */
 async function generateSignature(apiKey: string, secretKey: string, timestamp: number): Promise<string> {
   const signString = `key=${apiKey}&timestamp=${timestamp}`;
@@ -105,7 +106,7 @@ async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Resp
 }
 
 /**
- * 处理酷狗音乐请求：直连耀虎 API 并暴露所有错误细节
+ * 处理酷狗音乐请求（严格对齐官方 PHP Demo）
  */
 async function handleKugouApiRequest(url: URL, request: Request): Promise<Response> {
   const types = url.searchParams.get("types");
@@ -119,7 +120,7 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
   const isDebug = url.searchParams.get("debug") === "true";
 
   if (!keyword) {
-    return new Response(JSON.stringify({ error: "缺少搜索关键词 keyword/name" }), {
+    return new Response(JSON.stringify([]), {
       status: 200,
       headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
     });
@@ -131,12 +132,12 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
     const timestamp = Math.floor(Date.now() / 1000);
     const signature = await generateSignature(YAOHUD_API_KEY, YAOHUD_SECRET_KEY, timestamp);
 
+    // 严格匹配官方 PHP ApiClient 的 Header 注入逻辑
     const headersConfig: Record<string, string> = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "X-Api-Key": YAOHUD_API_KEY,
       "X-Api-Timestamp": timestamp.toString(),
-      "X-Api-Sign": signature,
-      "Content-Type": "application/json"
+      "X-Api-Sign": signature
     };
 
     const upstream = await fetch(targetUrl, { 
@@ -146,7 +147,6 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
 
     const rawText = await upstream.text();
 
-    // 🎯 开启 debug 模式，或 HTTP 状态码不为 200 时，直接暴露原始数据
     if (isDebug || upstream.status !== 200) {
       return new Response(JSON.stringify({
         debug_info: {
@@ -169,9 +169,8 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
     try {
       resData = JSON.parse(rawText);
     } catch {
-      // 说明耀虎 API 返回的不是 JSON（通常是 403 网页或防火墙拦截）
       return new Response(JSON.stringify({
-        error: "耀虎 API 未返回有效的 JSON 结构（可能触发了 API 防火墙/IP 拦截）",
+        error: "耀虎 API 未返回有效 JSON",
         upstream_http_status: upstream.status,
         upstream_raw_text: rawText
       }), {
@@ -180,7 +179,6 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
       });
     }
 
-    // 解析耀虎返回的数据
     if (resData && (resData.code == 200 || resData.code == "200" || resData.code == 1) && resData.data) {
       const rawInfo = resData.data;
       const items = Array.isArray(rawInfo) ? rawInfo : [rawInfo];
@@ -234,10 +232,9 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
       }
     }
 
-    // 如果耀虎 API 返回了业务错误码（如 code: 400，msg: "签名不正确"），直接展示
     return new Response(JSON.stringify({
-      error: "耀虎 API 返回业务异常",
-      yaohud_response: resData
+      error: "耀虎 API 未能返回有效歌曲",
+      response: resData
     }), {
       status: 200,
       headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
@@ -245,7 +242,7 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
 
   } catch (err: any) {
     return new Response(JSON.stringify({
-      error: "Worker 抓取耀虎 API 时发生网络异常",
+      error: "Worker 网络请求异常",
       details: err?.message || String(err)
     }), {
       status: 200,
@@ -256,13 +253,10 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
 
 async function proxyApiRequest(url: URL, request: Request, apiBaseUrl: string = DEFAULT_API_BASE_URL): Promise<Response> {
   const sourceParam = url.searchParams.get("source") || url.searchParams.get("site");
-  
-  // 命中酷狗源，强制走 handleKugouApiRequest 处理
   if (sourceParam === "kugou") {
     return await handleKugouApiRequest(url, request);
   }
 
-  // 其他源走默认后端代理
   const apiUrl = new URL(apiBaseUrl);
   url.searchParams.forEach((value, key) => {
     if (key === "target" || key === "callback" || key === "s" || key === "nocache" || key === "debug") {
