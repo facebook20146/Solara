@@ -778,6 +778,7 @@ const savedCurrentPlaylist = (() => {
 // API配置 - 适配 QQ 音乐直连 (通过 Worker 代理无损跨平台匹配网易云歌词)
 // API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直连，完美解决海外 IP 屏蔽与签名鉴权
 // API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直连，完美解决海外 IP 屏蔽与签名鉴权
+// API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直连，完美解决海外 IP 屏蔽与签名鉴权
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
 // yaohud API 鉴权配置
@@ -905,27 +906,28 @@ const API = {
             }
         }
 
-        // ================= 2. 酷狗音乐 (kg) 浏览器直连模式（参数修正为 msg） =================
+        // ================= 2. 酷狗音乐 (kg) 浏览器直连模式 (带 &n=1 获取直链) =================
         if (source === "kg" || source === "kugou") {
-            const kgUrl = `https://api.yaohud.cn/api/music/kg?msg=${encodeURIComponent(keyword)}&key=${YAOHUD_API_KEY}`;
+            let kgUrl = `https://api.yaohud.cn/api/music/kg?msg=${encodeURIComponent(keyword)}&n=1&key=${YAOHUD_API_KEY}`;
             debugLog(`[酷狗音乐直连] API请求: ${kgUrl}`);
 
             try {
                 const headers = await getYaohudHeaders(YAOHUD_API_KEY, YAOHUD_SECRET_KEY);
-                const response = await fetch(kgUrl, { method: 'GET', headers: headers });
+                let response = await fetch(kgUrl, { method: 'GET', headers: headers });
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const resData = await response.json();
+                let resData = await response.json();
 
                 debugLog(`[酷狗音乐直连] API响应: ${JSON.stringify(resData).substring(0, 200)}...`);
 
-                const dataObj = resData.data || resData;
-                if (resData && (resData.code === 200 || resData.code === 1 || resData.status === 200) && (dataObj.url || dataObj.music_url)) {
-                    const songTitle = dataObj.name || keyword;
-                    const songArtist = dataObj.artist || dataObj.singer || "未知歌手";
+                let dataObj = resData.data || resData;
+                let playUrl = dataObj.url || dataObj.music_url || dataObj.play_url || dataObj.song_url || dataObj.mp3 || dataObj.audio;
+
+                if (resData && (resData.code === 200 || resData.code === 1 || resData.status === 200) && playUrl) {
+                    const songTitle = dataObj.name || dataObj.title || keyword;
+                    const songArtist = dataObj.artist || dataObj.singer || dataObj.author || "未知歌手";
                     const songAlbum = dataObj.album || songTitle;
-                    const playUrl = dataObj.url || dataObj.music_url;
-                    const picUrl = dataObj.pic || dataObj.cover || dataObj.img || "";
-                    let lyricStr = dataObj.lyric || dataObj.lrc || "[00:00.00] 酷狗音乐直连播放中\n";
+                    const picUrl = dataObj.pic || dataObj.cover || dataObj.img || dataObj.pic_url || "";
+                    let lyricStr = dataObj.lyric || dataObj.lrc || dataObj.lrc_text || "[00:00.00] 酷狗音乐直连播放中\n";
 
                     const songItem = {
                         id: `kg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -952,27 +954,28 @@ const API = {
             }
         }
 
-        // ================= 3. 酷我音乐 (kw) 浏览器直连模式（参数修正为 msg） =================
+        // ================= 3. 酷我音乐 (kw) 浏览器直连模式 (带 &n=1 获取直链) =================
         if (source === "kw" || source === "kuwo") {
-            const kwUrl = `https://api.yaohud.cn/api/music/kuwo?msg=${encodeURIComponent(keyword)}&key=${YAOHUD_API_KEY}`;
+            let kwUrl = `https://api.yaohud.cn/api/music/kuwo?msg=${encodeURIComponent(keyword)}&n=1&key=${YAOHUD_API_KEY}`;
             debugLog(`[酷我音乐直连] API请求: ${kwUrl}`);
 
             try {
                 const headers = await getYaohudHeaders(YAOHUD_API_KEY, YAOHUD_SECRET_KEY);
-                const response = await fetch(kwUrl, { method: 'GET', headers: headers });
+                let response = await fetch(kwUrl, { method: 'GET', headers: headers });
                 if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const resData = await response.json();
+                let resData = await response.json();
 
                 debugLog(`[酷我音乐直连] API响应: ${JSON.stringify(resData).substring(0, 200)}...`);
 
-                const dataObj = resData.data || resData;
-                if (resData && (resData.code === 200 || resData.code === 1 || resData.status === 200) && (dataObj.url || dataObj.music_url)) {
-                    const songTitle = dataObj.name || keyword;
-                    const songArtist = dataObj.artist || dataObj.singer || "未知歌手";
+                let dataObj = resData.data || resData;
+                let playUrl = dataObj.url || dataObj.music_url || dataObj.play_url || dataObj.song_url || dataObj.mp3 || dataObj.audio;
+
+                if (resData && (resData.code === 200 || resData.code === 1 || resData.status === 200) && playUrl) {
+                    const songTitle = dataObj.name || dataObj.title || keyword;
+                    const songArtist = dataObj.artist || dataObj.singer || dataObj.author || "未知歌手";
                     const songAlbum = dataObj.album || songTitle;
-                    const playUrl = dataObj.url || dataObj.music_url;
-                    const picUrl = dataObj.pic || dataObj.cover || dataObj.img || "";
-                    let lyricStr = dataObj.lyric || dataObj.lrc || "[00:00.00] 酷我音乐直连播放中\n";
+                    const picUrl = dataObj.pic || dataObj.cover || dataObj.img || dataObj.pic_url || "";
+                    let lyricStr = dataObj.lyric || dataObj.lrc || dataObj.lrc_text || "[00:00.00] 酷我音乐直连播放中\n";
 
                     const songItem = {
                         id: `kw_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
