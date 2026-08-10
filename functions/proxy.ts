@@ -1,198 +1,136 @@
-const DEFAULT_API_BASE_URL = "https://music-api.gdstudio.xyz/api.php";
-const KUWO_HOST_PATTERN = /(^|\.)kuwo\.cn$/i;
-const SAFE_RESPONSE_HEADERS = ["content-type", "cache-control", "accept-ranges", "content-length", "content-range", "etag", "last-modified", "expires"];
+// 基本配置
+const DEFAULT_API_BASE_URL = 'https://music-api.gdstudio.xyz/api.php';
+const API_KEY = 'Z2mDyU4rUTUEBbPYdbK';
+const SECRET_KEY = 'fbda8f0550be131b05d22dc0d0ad3e4b';
 
-function createCorsHeaders(init?: Headers): Headers {
-  const headers = new Headers();
-  if (init) {
-    for (const [key, value] of init.entries()) {
-      if (SAFE_RESPONSE_HEADERS.includes(key.toLowerCase())) {
-        headers.set(key, value);
-      }
+/**
+ * 辅助函数：生成 HMAC-SHA256 签名（替代原 PHP 中的签名算法）
+ */
+async function generateSignature(apiKey: string, secretKey: string, timestamp: number): Promise<string> {
+    const signString = `key=${apiKey}&timestamp=${timestamp}`;
+    const encoder = new TextEncoder();
+    const keyData = encoder.encode(secretKey);
+    const msgData = encoder.encode(signString);
+
+    const cryptoKey = await crypto.subtle.importKey(
+        'raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    );
+    const signatureBuffer = await crypto.subtle.sign('HMAC', cryptoKey, msgData);
+    
+    // 转为 16 进制字符串
+    const hashArray = Array.from(new Uint8Array(signatureBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function onRequest(context: any) {
+    const { request } = context;
+    const reqUrl = new URL(request.url);
+
+    // 1. 代理酷我/第三方音频流（绕过跨域）
+    const target = reqUrl.searchParams.get('target');
+    if (target) {
+        return fetch(target, {
+            headers: {
+                'User-Agent': request.headers.get('user-agent') || 'Mozilla/5.0',
+                'Referer': 'https://www.kuwo.cn/',
+            }
+        });
     }
-  }
-  if (!headers.has("Cache-Control")) {
-    headers.set("Cache-Control", "no-store");
-  }
-  headers.set("Access-Control-Allow-Origin", "*");
-  return headers;
-}
 
-function handleOptions(): Response {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET,HEAD,OPTIONS",
-      "Access-Control-Allow-Headers": "*",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
-}
+    const types = reqUrl.searchParams.get('types');
+    const source = reqUrl.searchParams.get('source');
+    const name = reqUrl.searchParams.get('name') || '';
+    const id = reqUrl.searchParams.get('id') || '';
 
-function isAllowedKuwoHost(hostname: string): boolean {
-  if (!hostname) return false;
-  return KUWO_HOST_PATTERN.test(hostname);
-}
+    // 2. 特殊处理：酷狗音乐源（使用带签名的 耀虎 API）
+    if (source === 'kugou') {
+        const keyword = name || id;
+        const targetUrl = `https://api.yaohud.cn/api/music/kg?key=${API_KEY}&msg=${encodeURIComponent(keyword)}&n=1&quality=320&type=json`;
 
-function normalizeKuwoUrl(rawUrl: string): URL | null {
-  try {
-    const parsed = new URL(rawUrl);
-    if (!isAllowedKuwoHost(parsed.hostname)) {
-      return null;
+        try {
+            // 生成时间戳和签名头
+            const timestamp = Math.floor(Date.now() / 1000);
+            const signature = await generateSignature(API_KEY, SECRET_KEY, timestamp);
+
+            // 发起带签名请求头的 API 请求
+            const resp = await fetch(targetUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0',
+                    'X-Api-Key': API_KEY,
+                    'X-Api-Timestamp': timestamp.toString(),
+                    'X-Api-Sign': signature
+                }
+            });
+
+            const resData = await resp.json() as any;
+
+            if (resData.code === 200 && resData.data) {
+                const info = resData.data;
+
+                // ① 搜索请求
+                if (types === 'search') {
+                    const searchResult = [{
+                        id: info.name + ' - ' + info.singer,
+                        name: info.name,
+                        artist: [info.singer],
+                        album: info.name,
+                        pic_id: info.name + ' - ' + info.singer,
+                        url_id: info.name + ' - ' + info.singer,
+                        lyric_id: info.name + ' - ' + info.singer,
+                        source: 'kugou'
+                    }];
+                    return new Response(JSON.stringify(searchResult), {
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                    });
+                }
+
+                // ② 获取播放链接
+                if (types === 'url') {
+                    return new Response(JSON.stringify({ url: info.play_url, br: 320 }), {
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                    });
+                }
+
+                // ③ 获取歌曲封面
+                if (types === 'pic') {
+                    return new Response(JSON.stringify({ url: info.cover }), {
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                    });
+                }
+
+                // ④ 获取歌词（若无歌词则返回空）
+                if (types === 'lyric') {
+                    return new Response(JSON.stringify({ lyric: '', tlyric: '' }), {
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                    });
+                }
+            }
+        } catch (e) {
+            console.error('[Kugou Signed Request Error]', e);
+        }
     }
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return null;
-    }
-    parsed.protocol = "http:";
-    return parsed;
-  } catch {
-    return null;
-  }
-}
 
-async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Response> {
-  const normalized = normalizeKuwoUrl(targetUrl);
-  if (!normalized) {
-    return new Response("Invalid target", { status: 400 });
-  }
+    // 3. 默认逻辑：其他音乐源转发至原有 API
+    const apiUrl = new URL(DEFAULT_API_BASE_URL);
+    reqUrl.searchParams.forEach((v, k) => {
+        if (k !== 'target' && k !== 's' && k !== 'nocache') {
+            apiUrl.searchParams.set(k, v);
+        }
+    });
 
-  const init: RequestInit = {
-    method: request.method,
-    headers: {
-      "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
-      "Referer": "https://www.kuwo.cn/",
-    },
-  };
+    const upstream = await fetch(apiUrl.toString(), {
+        headers: {
+            'User-Agent': request.headers.get('user-agent') || 'Mozilla/5.0',
+            'Accept': 'application/json',
+        }
+    });
 
-  const rangeHeader = request.headers.get("Range");
-  if (rangeHeader) {
-    (init.headers as Record<string, string>)["Range"] = rangeHeader;
-  }
-
-  const upstream = await fetch(normalized.toString(), init);
-  const headers = createCorsHeaders(upstream.headers);
-  if (!headers.has("Cache-Control")) {
-    headers.set("Cache-Control", "public, max-age=3600");
-  }
-
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
-}
-
-async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise: Promise<any>) => void, apiBaseUrl: string = DEFAULT_API_BASE_URL): Promise<Response> {
-  const cache = caches.default;
-  
-  // 构建缓存 Key（过滤掉随机签名 s 以及强制刷新标记 nocache，以便重试成功后能更新同一个缓存项）
-  const cacheUrl = new URL(url.toString());
-  cacheUrl.searchParams.delete("s");
-  cacheUrl.searchParams.delete("nocache");
-  
-  const cacheKey = new Request(cacheUrl.toString(), {
-    method: request.method,
-    headers: request.headers
-  });
-
-  // 如果是 GET 请求且未指定 nocache 强制刷新，尝试命中缓存
-  const bypassCache = url.searchParams.get("nocache") === "true";
-  if (request.method === "GET" && !bypassCache) {
-    try {
-      const cachedResponse = await cache.match(cacheKey);
-      if (cachedResponse) {
-        console.log(`[Cache HIT] ${url.toString()}`);
-        const response = new Response(cachedResponse.body, cachedResponse);
-        response.headers.set("X-Cache-Status", "HIT");
-        response.headers.set("Access-Control-Expose-Headers", "X-Cache-Status");
-        return response;
-      }
-    } catch (err) {
-      console.warn(`[Cache ERROR] ${url.toString()}`, err);
-    }
-  }
-
-  console.log(`[Cache MISS] Fetching from upstream: ${url.toString()}`);
-
-  const apiUrl = new URL(apiBaseUrl);
-  url.searchParams.forEach((value, key) => {
-    if (key === "target" || key === "callback" || key === "s" || key === "nocache") {
-      return;
-    }
-    apiUrl.searchParams.set(key, value);
-  });
-
-  if (!apiUrl.searchParams.has("types")) {
-    return new Response("Missing types", { status: 400 });
-  }
-
-  const upstream = await fetch(apiUrl.toString(), {
-    headers: {
-      "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
-      "Accept": "application/json",
-    },
-  });
-
-  const responseText = await upstream.text();
-  const headers = createCorsHeaders(upstream.headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json; charset=utf-8");
-  }
-
-  headers.set("X-Cache-Status", "MISS");
-  headers.set("Access-Control-Expose-Headers", "X-Cache-Status");
-
-  // 判断是否应该缓存：必须是 200 状态，且内容不能是空数组或包含错误标识，且未指定强制刷新
-  const isSearch = url.searchParams.get("types") === "search";
-  const isEmptyResult = responseText.trim() === "[]";
-  const isError = responseText.includes('"error"') || responseText.includes('"status":0');
-  
-  let shouldCache = upstream.status === 200 && request.method === "GET" && !isError && !bypassCache;
-  
-  // 如果是搜索请求且结果为空，通常是 API 繁忙或异常，不建议长缓存
-  if (isSearch && isEmptyResult) {
-    shouldCache = false;
-  }
-
-  if (shouldCache) {
-    headers.set("Cache-Control", "public, s-maxage=300, max-age=300");
-  } else {
-    headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
-  }
-
-  const response = new Response(responseText, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers,
-  });
-
-  // 写入缓存（不阻塞主流程）
-  if (shouldCache && waitUntil) {
-    waitUntil(cache.put(cacheKey, response.clone()));
-    console.log(`[Cache PUT] Saved to cache: ${url.toString()}`);
-  }
-
-  return response;
-}
-
-export async function onRequest({ request, waitUntil, env }: { request: Request, waitUntil: (promise: Promise<any>) => void, env: any }): Promise<Response> {
-  // 优先使用环境变量中配置的 API 地址，CF 部署未设置时 fallback 到默认节点
-  const apiBaseUrl = (typeof env?.API_BASE_URL === "string" && env.API_BASE_URL) ? env.API_BASE_URL : DEFAULT_API_BASE_URL;
-  if (request.method === "OPTIONS") {
-    return handleOptions();
-  }
-
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return new Response("Method not allowed", { status: 405 });
-  }
-
-  const url = new URL(request.url);
-  const target = url.searchParams.get("target");
-
-  if (target) {
-    return proxyKuwoAudio(target, request);
-  }
-
-  return proxyApiRequest(url, request, waitUntil, apiBaseUrl);
+    const body = await upstream.text();
+    return new Response(body, {
+        status: upstream.status,
+        headers: {
+            'Content-Type': upstream.headers.get('content-type') || 'application/json',
+            'Access-Control-Allow-Origin': '*',
+        }
+    });
 }
