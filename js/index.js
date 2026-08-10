@@ -773,6 +773,7 @@ const savedCurrentPlaylist = (() => {
 // API配置 - 适配 QQ 音乐浏览器直连 (绕过 Worker 防火墙拦截)
 // API配置 - 适配 QQ 音乐浏览器直连 (完美修复 MP3 播放与 JSON 解析)
 // API配置 - 完美适配 QQ 音乐直连与 MP3 音频解析
+// API配置 - 适配 QQ 音乐直连 (增强歌词字段兼容性与容错)
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
 const API = {
@@ -857,7 +858,14 @@ const API = {
                     const songAlbum = resData.album || songTitle;
                     const playUrl = resData.music_url || resData.url;
                     const picUrl = resData.pic || resData.cover || "";
-                    const lyricStr = resData.lyric || resData.lrc || "";
+                    
+                    // 广撒网捞取所有可能的歌词字段名
+                    let lyricStr = resData.lyric || resData.lrc || resData.lyric_str || resData.songlrc || "";
+                    
+                    // 如果依然没有歌词，填入一句友好的占位符防止框架报错
+                    if (!lyricStr) {
+                        lyricStr = "[00:00.00] 暂无当前歌曲歌词，请前往专业音乐平台查看\n";
+                    }
 
                     const songItem = {
                         id: `qq_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
