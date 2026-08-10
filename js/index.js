@@ -771,6 +771,7 @@ const savedCurrentPlaylist = (() => {
 
 // API配置 - 修复API地址和请求方式
 // API配置 - 适配 QQ 音乐浏览器直连 (绕过 Worker 防火墙拦截)
+// API配置 - 适配 QQ 音乐浏览器直连 (完美修复 MP3 播放与 JSON 解析)
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
 const API = {
@@ -940,8 +941,9 @@ const API = {
     },
 
     getSongUrl: (song, quality = "320") => {
-        if (song.source === "qq" && (song._directUrl || song.url_id?.startsWith("http"))) {
-            return song._directUrl || song.url_id;
+        if (song.source === "qq" && song._directUrl) {
+            const json = JSON.stringify({ url: song._directUrl, br: 320 });
+            return "data:application/json;charset=utf-8," + encodeURIComponent(json);
         }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=url&id=${song.id}&source=${song.source || "netease"}&br=${quality}&s=${signature}`;
@@ -949,16 +951,17 @@ const API = {
 
     getLyric: (song) => {
         if (song.source === "qq" && song._directLyric !== undefined) {
-            const lyricObj = { lyric: song._directLyric || "", tlyric: "" };
-            return "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(lyricObj));
+            const json = JSON.stringify({ lyric: song._directLyric || "", tlyric: "" });
+            return "data:application/json;charset=utf-8," + encodeURIComponent(json);
         }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=lyric&id=${song.lyric_id || song.id}&source=${song.source || "netease"}&s=${signature}`;
     },
 
     getPicUrl: (song) => {
-        if (song.source === "qq" && (song._directPic || song.pic_id?.startsWith("http"))) {
-            return song._directPic || song.pic_id;
+        if (song.source === "qq" && song._directPic) {
+            const json = JSON.stringify({ url: song._directPic });
+            return "data:application/json;charset=utf-8," + encodeURIComponent(json);
         }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=pic&id=${song.pic_id}&source=${song.source || "netease"}&size=300&s=${signature}`;
