@@ -776,6 +776,7 @@ const savedCurrentPlaylist = (() => {
 // API配置 - 适配 QQ 音乐直连 (增强歌词字段兼容性与容错)
 // API配置 - 适配 QQ 音乐直连 (独创网易云歌词跨平台动态匹配技术)
 // API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直链
+// API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直链
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
 // yaohud API 鉴权配置
@@ -807,7 +808,7 @@ async function getYaohudHeaders(apiKey, secretKey) {
 }
 
 /**
- * 辅助函数：智能多字段匹配
+ * 辅助函数：智能多字段提取
  */
 function getFieldValue(obj, keys, fallback = '') {
     if (!obj || typeof obj !== 'object') return fallback;
@@ -817,6 +818,44 @@ function getFieldValue(obj, keys, fallback = '') {
         }
     }
     return fallback;
+}
+
+/**
+ * 辅助函数：深层提取音频 URL（兼容嵌套对象如 vipmusic.url）
+ */
+function extractAudioUrl(dataObj) {
+    if (!dataObj || typeof dataObj !== 'object') return '';
+
+    const directKeys = ['url', 'music_url', 'music', 'musicurl', 'play_url', 'playurl', 'song_url', 'songurl', 'mp3', 'audio', 'link'];
+    let directUrl = getFieldValue(dataObj, directKeys);
+    if (directUrl) return directUrl;
+
+    // 针对酷我等 API 嵌套结构 (data.vipmusic.url / data.music.url)
+    if (dataObj.vipmusic && typeof dataObj.vipmusic === 'object') {
+        let vipUrl = getFieldValue(dataObj.vipmusic, directKeys);
+        if (vipUrl) return vipUrl;
+    }
+    if (dataObj.music && typeof dataObj.music === 'object') {
+        let nestedMusicUrl = getFieldValue(dataObj.music, directKeys);
+        if (nestedMusicUrl) return nestedMusicUrl;
+    }
+
+    return '';
+}
+
+/**
+ * 辅助函数：深层提取歌词（兼容对象结构如 lyric.lrc）
+ */
+function extractLyric(dataObj, defaultText) {
+    if (!dataObj || typeof dataObj !== 'object') return defaultText;
+
+    if (typeof dataObj.lyric === 'object' && dataObj.lyric !== null) {
+        if (dataObj.lyric.lrc && typeof dataObj.lyric.lrc === 'string') {
+            return dataObj.lyric.lrc;
+        }
+    }
+    const lyricKeys = ['lyric', 'lrc', 'lrc_text', 'text'];
+    return getFieldValue(dataObj, lyricKeys, defaultText);
 }
 
 const API = {
@@ -920,7 +959,6 @@ const API = {
 
             debugLog(`[${platLabel}音乐直连] API请求: ${targetUrl}`);
 
-            // 带自动重试机制的 fetch 函数（防止偶发 503）
             const fetchWithRetry = async (retries = 1) => {
                 const headers = await getYaohudHeaders(YAOHUD_API_KEY, YAOHUD_SECRET_KEY);
                 try {
@@ -939,25 +977,18 @@ const API = {
 
             try {
                 const resData = await fetchWithRetry(1);
-                debugLog(`[${platLabel}音乐直连] API原始响应: ${JSON.stringify(resData)}`);
-
                 const dataObj = resData.data || resData;
 
-                // 多字段全匹配提取
-                const urlKeys = ['url', 'music_url', 'music', 'musicurl', 'play_url', 'playurl', 'song_url', 'songurl', 'mp3', 'audio', 'link'];
-                const titleKeys = ['name', 'title', 'songtitle'];
-                const artistKeys = ['songname', 'artist', 'singer', 'author'];
-                const picKeys = ['picture', 'pic', 'cover', 'img', 'pic_url'];
-                const lyricKeys = ['lyric', 'lrc', 'lrc_text', 'text'];
-
-                const playUrl = getFieldValue(dataObj, urlKeys) || getFieldValue(resData, urlKeys);
-                const songTitle = getFieldValue(dataObj, titleKeys, keyword);
-                const songArtist = getFieldValue(dataObj, artistKeys, "未知歌手");
+                // 深层智能提取音频 URL
+                const playUrl = extractAudioUrl(dataObj) || extractAudioUrl(resData);
+                const songTitle = getFieldValue(dataObj, ['name', 'title', 'songtitle'], keyword);
+                const songArtist = getFieldValue(dataObj, ['songname', 'artist', 'singer', 'author'], "未知歌手");
                 const songAlbum = getFieldValue(dataObj, ['album'], songTitle);
-                const picUrl = getFieldValue(dataObj, picKeys);
-                let lyricStr = getFieldValue(dataObj, lyricKeys, `[00:00.00] ${platLabel}音乐直连播放中\n`);
+                const picUrl = getFieldValue(dataObj, ['picture', 'pic', 'cover', 'img', 'pic_url']);
+                const lyricStr = extractLyric(dataObj, `[00:00.00] ${platLabel}音乐直连播放中\n`);
 
                 if (resData && (resData.code === 200 || resData.code === 1 || resData.status === 200) && playUrl) {
+                    debugLog(`[${platLabel}音乐直连] 解析成功！音频链接: ${playUrl}`);
                     return [{
                         id: `${platName}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                         name: songTitle,
