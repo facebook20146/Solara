@@ -112,14 +112,24 @@ async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Resp
  */
 async function handleKugouApiRequest(url: URL, request: Request): Promise<Response | null> {
   const types = url.searchParams.get("types");
+  
+  // 🎯【修改点 1】：兼容更多关键词获取途径（name, keyword, s, id）
   const name = url.searchParams.get("name") || "";
+  const keywordParam = url.searchParams.get("keyword") || "";
+  const searchS = url.searchParams.get("s") || "";
   const id = url.searchParams.get("id") || "";
-  const keyword = name || id;
+  const keyword = name || keywordParam || searchS || id;
+
+  // 🎯【修改点 2】：增加调试模式
+  const isDebug = url.searchParams.get("debug") === "true";
 
   if (!keyword) {
     if (types === "search") {
-      return new Response(JSON.stringify([]), {
-        status: 200,
+      return new Response(JSON.stringify({ 
+        error: "缺少关键词参数", 
+        hint: "请在请求中传入 name、keyword 或 s 参数" 
+      }), {
+        status: 400,
         headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
       });
     }
@@ -144,7 +154,25 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
 
     const resData = await upstream.json() as any;
 
-    if (resData && resData.code === 200 && resData.data) {
+    // 🎯【调试输出】：如果带了 &debug=true，直接原样返回耀虎 API 响应结果
+    if (isDebug) {
+      return new Response(JSON.stringify({
+        debug_info: {
+          requested_keyword: keyword,
+          targetUrl,
+          timestamp,
+          signature,
+          upstream_status: upstream.status
+        },
+        upstream_response: resData
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    // 🎯【修改点 3】：宽松匹配 code（兼容数字 200 和字符串 "200"）
+    if (resData && (resData.code == 200 || resData.code == "200") && resData.data) {
       const info = resData.data;
       let resultData: any = null;
 
@@ -171,7 +199,7 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
       } 
       // 4. 获取歌词
       else if (types === "lyric") {
-        resultData = { lyric: "", tlyric: "" };
+        resultData = { lyric: info.lyric || "", tlyric: "" };
       }
 
       if (resultData !== null) {
@@ -186,21 +214,24 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
       }
     } else {
       console.warn("[Kugou API Non-200]", resData);
-      if (types === "search") {
-        return new Response(JSON.stringify([]), {
-          status: 200,
-          headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-        });
-      }
-    }
-  } catch (err) {
-    console.error("[Kugou Request Error]", err);
-    if (types === "search") {
-      return new Response(JSON.stringify([]), {
-        status: 200,
+      // 🎯【修改点 4】：抛出具体错误提示，便于定位是 Key 错误还是 API 问题
+      return new Response(JSON.stringify({
+        error: "上游 API 返回错误",
+        upstream_data: resData
+      }), {
+        status: 500,
         headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
       });
     }
+  } catch (err: any) {
+    console.error("[Kugou Request Error]", err);
+    return new Response(JSON.stringify({
+      error: "Worker 请求上游异常",
+      message: err?.message || String(err)
+    }), {
+      status: 500,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+    });
   }
 
   return null;
@@ -213,6 +244,7 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
   const cacheUrl = new URL(url.toString());
   cacheUrl.searchParams.delete("s");
   cacheUrl.searchParams.delete("nocache");
+  cacheUrl.searchParams.delete("debug");
   
   const cacheKey = new Request(cacheUrl.toString(), {
     method: request.method,
@@ -220,7 +252,7 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
   });
 
   // 如果是 GET 请求且未指定 nocache 强制刷新，尝试命中缓存
-  const bypassCache = url.searchParams.get("nocache") === "true";
+  const bypassCache = url.searchParams.get("nocache") === "true" || url.searchParams.get("debug") === "true";
   if (request.method === "GET" && !bypassCache) {
     try {
       const cachedResponse = await cache.match(cacheKey);
@@ -240,8 +272,8 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
   if (url.searchParams.get("source") === "kugou") {
     const kugouResponse = await handleKugouApiRequest(url, request);
     if (kugouResponse) {
-      // 同样支持 Edge 边缘缓存
-      if (waitUntil && request.method === "GET" && !bypassCache) {
+      // 同样支持 Edge 边缘缓存（仅在非 500 且未开启 debug 时缓存）
+      if (waitUntil && request.method === "GET" && !bypassCache && kugouResponse.status === 200) {
         waitUntil(cache.put(cacheKey, kugouResponse.clone()));
       }
       return kugouResponse;
@@ -252,7 +284,7 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
 
   const apiUrl = new URL(apiBaseUrl);
   url.searchParams.forEach((value, key) => {
-    if (key === "target" || key === "callback" || key === "s" || key === "nocache") {
+    if (key === "target" || key === "callback" || key === "s" || key === "nocache" || key === "debug") {
       return;
     }
     apiUrl.searchParams.set(key, value);
@@ -278,14 +310,12 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
   headers.set("X-Cache-Status", "MISS");
   headers.set("Access-Control-Expose-Headers", "X-Cache-Status");
 
-  // 判断是否应该缓存：必须是 200 状态，且内容不能是空数组或包含错误标识，且未指定强制刷新
   const isSearch = url.searchParams.get("types") === "search";
   const isEmptyResult = responseText.trim() === "[]";
   const isError = responseText.includes('"error"') || responseText.includes('"status":0');
   
   let shouldCache = upstream.status === 200 && request.method === "GET" && !isError && !bypassCache;
   
-  // 如果是搜索请求且结果为空，通常是 API 繁忙或异常，不建议长缓存
   if (isSearch && isEmptyResult) {
     shouldCache = false;
   }
@@ -302,7 +332,6 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
     headers,
   });
 
-  // 写入缓存（不阻塞主流程）
   if (shouldCache && waitUntil) {
     waitUntil(cache.put(cacheKey, response.clone()));
     console.log(`[Cache PUT] Saved to cache: ${url.toString()}`);
@@ -312,7 +341,6 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
 }
 
 export async function onRequest({ request, waitUntil, env }: { request: Request, waitUntil: (promise: Promise<any>) => void, env: any }): Promise<Response> {
-  // 优先使用环境变量中配置的 API 地址，CF 部署未设置时 fallback 到默认节点
   const apiBaseUrl = (typeof env?.API_BASE_URL === "string" && env.API_BASE_URL) ? env.API_BASE_URL : DEFAULT_API_BASE_URL;
   if (request.method === "OPTIONS") {
     return handleOptions();
