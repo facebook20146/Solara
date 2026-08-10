@@ -777,9 +777,10 @@ const savedCurrentPlaylist = (() => {
 // API配置 - 适配 QQ 音乐直连 (独创网易云歌词跨平台动态匹配技术)
 // API配置 - 适配 QQ 音乐直连 (通过 Worker 代理无损跨平台匹配网易云歌词)
 // API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直连，完美解决海外 IP 屏蔽与签名鉴权
+// API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直连，完美解决海外 IP 屏蔽与签名鉴权
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
-// yaohud API 鉴权配置（来自你的 PHP 文档）
+// yaohud API 鉴权配置
 const YAOHUD_API_KEY = "Z2mDyU4rUTUEBbPYdbK";
 const YAOHUD_SECRET_KEY = "75da5a53198ed28ece7d1d4e9cf381d1";
 
@@ -825,7 +826,6 @@ const API = {
             }
         }
 
-        // 核心修复：音频直链或第三方直连 API 直接由浏览器发起请求，跳过 Worker 代理
         if (typeof url === "string" && (
             url.includes(".mp3") || 
             url.includes("qqmusic") || 
@@ -905,9 +905,9 @@ const API = {
             }
         }
 
-        // ================= 2. 酷狗音乐 (kg) 浏览器直连模式 =================
+        // ================= 2. 酷狗音乐 (kg) 浏览器直连模式（参数修正为 msg） =================
         if (source === "kg" || source === "kugou") {
-            const kgUrl = `https://api.yaohud.cn/api/music/kg?name=${encodeURIComponent(keyword)}&key=${YAOHUD_API_KEY}`;
+            const kgUrl = `https://api.yaohud.cn/api/music/kg?msg=${encodeURIComponent(keyword)}&key=${YAOHUD_API_KEY}`;
             debugLog(`[酷狗音乐直连] API请求: ${kgUrl}`);
 
             try {
@@ -952,9 +952,9 @@ const API = {
             }
         }
 
-        // ================= 3. 酷我音乐 (kw) 浏览器直连模式（新接入） =================
+        // ================= 3. 酷我音乐 (kw) 浏览器直连模式（参数修正为 msg） =================
         if (source === "kw" || source === "kuwo") {
-            const kwUrl = `https://api.yaohud.cn/api/music/kuwo?name=${encodeURIComponent(keyword)}&key=${YAOHUD_API_KEY}`;
+            const kwUrl = `https://api.yaohud.cn/api/music/kuwo?msg=${encodeURIComponent(keyword)}&key=${YAOHUD_API_KEY}`;
             debugLog(`[酷我音乐直连] API请求: ${kwUrl}`);
 
             try {
