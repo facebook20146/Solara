@@ -116,7 +116,15 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
   const id = url.searchParams.get("id") || "";
   const keyword = name || id;
 
-  if (!keyword) return null;
+  if (!keyword) {
+    if (types === "search") {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+    return null;
+  }
 
   const targetUrl = `https://api.yaohud.cn/api/music/kg?key=${YAOHUD_API_KEY}&msg=${encodeURIComponent(keyword)}&n=1&quality=320&type=json`;
 
@@ -136,7 +144,7 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
 
     const resData = await upstream.json() as any;
 
-    if (resData.code === 200 && resData.data) {
+    if (resData && resData.code === 200 && resData.data) {
       const info = resData.data;
       let resultData: any = null;
 
@@ -166,7 +174,7 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
         resultData = { lyric: "", tlyric: "" };
       }
 
-      if (resultData) {
+      if (resultData !== null) {
         return new Response(JSON.stringify(resultData), {
           status: 200,
           headers: {
@@ -176,9 +184,23 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
           }
         });
       }
+    } else {
+      console.warn("[Kugou API Non-200]", resData);
+      if (types === "search") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+        });
+      }
     }
   } catch (err) {
     console.error("[Kugou Request Error]", err);
+    if (types === "search") {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      });
+    }
   }
 
   return null;
@@ -187,7 +209,7 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
 async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise: Promise<any>) => void, apiBaseUrl: string = DEFAULT_API_BASE_URL): Promise<Response> {
   const cache = caches.default;
   
-  // 构建缓存 Key（过滤掉随机签名 s 以及强制刷新标记 nocache，以便重试成功后能更新同一个缓存项）
+  // 构建缓存 Key（过滤掉随机签名 s 以及强制刷新标记 nocache）
   const cacheUrl = new URL(url.toString());
   cacheUrl.searchParams.delete("s");
   cacheUrl.searchParams.delete("nocache");
@@ -216,7 +238,7 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
 
   // 特殊判断：如果前端请求的是酷狗 (source=kugou)，走带有 HMAC 加密的耀虎 API
   if (url.searchParams.get("source") === "kugou") {
-    const kugouResponse = await handleKugouRequest(url, request);
+    const kugouResponse = await handleKugouApiRequest(url, request);
     if (kugouResponse) {
       // 同样支持 Edge 边缘缓存
       if (waitUntil && request.method === "GET" && !bypassCache) {
