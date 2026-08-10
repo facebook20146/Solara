@@ -37,9 +37,7 @@ function createCorsHeaders(init?: Headers): Headers {
       }
     }
   }
-  if (!headers.has("Cache-Control")) {
-    headers.set("Cache-Control", "no-store");
-  }
+  headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
   headers.set("Access-Control-Allow-Origin", "*");
   return headers;
 }
@@ -98,9 +96,6 @@ async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Resp
 
   const upstream = await fetch(normalized.toString(), init);
   const headers = createCorsHeaders(upstream.headers);
-  if (!headers.has("Cache-Control")) {
-    headers.set("Cache-Control", "public, max-age=3600");
-  }
 
   return new Response(upstream.body, {
     status: upstream.status,
@@ -110,13 +105,10 @@ async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Resp
 }
 
 /**
- * 处理酷狗音乐请求：向耀虎 API 发送带签名的加密 Headers 请求
- * 如果耀虎 API 无数据或报错，自动返回 null 以触发默认源兜底
+ * 处理酷狗音乐请求：直连耀虎 API 并暴露所有错误细节
  */
-async function handleKugouApiRequest(url: URL, request: Request): Promise<Response | null> {
+async function handleKugouApiRequest(url: URL, request: Request): Promise<Response> {
   const types = url.searchParams.get("types");
-  
-  // 兼容各种前端传参规范 (name / keyword / s / id / query)
   const name = url.searchParams.get("name") || "";
   const keywordParam = url.searchParams.get("keyword") || "";
   const searchS = url.searchParams.get("s") || "";
@@ -127,7 +119,10 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
   const isDebug = url.searchParams.get("debug") === "true";
 
   if (!keyword) {
-    return null;
+    return new Response(JSON.stringify({ error: "缺少搜索关键词 keyword/name" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+    });
   }
 
   const targetUrl = `https://api.yaohud.cn/api/music/kg?key=${YAOHUD_API_KEY}&msg=${encodeURIComponent(keyword)}&n=1&quality=320&type=json`;
@@ -137,25 +132,22 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
     const signature = await generateSignature(YAOHUD_API_KEY, YAOHUD_SECRET_KEY, timestamp);
 
     const headersConfig: Record<string, string> = {
-      "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "X-Api-Key": YAOHUD_API_KEY,
       "X-Api-Timestamp": timestamp.toString(),
       "X-Api-Sign": signature,
       "Content-Type": "application/json"
     };
 
-    const upstream = await fetch(targetUrl, { headers: headersConfig });
+    const upstream = await fetch(targetUrl, { 
+      method: "GET",
+      headers: headersConfig 
+    });
+
     const rawText = await upstream.text();
-    let resData: any = null;
 
-    try {
-      resData = JSON.parse(rawText);
-    } catch {
-      console.warn("[Yaohud API non-JSON response]", rawText);
-    }
-
-    // 🎯 调试模式直接输出原始数据
-    if (isDebug) {
+    // 🎯 开启 debug 模式，或 HTTP 状态码不为 200 时，直接暴露原始数据
+    if (isDebug || upstream.status !== 200) {
       return new Response(JSON.stringify({
         debug_info: {
           requested_keyword: keyword,
@@ -163,126 +155,114 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
           timestamp,
           signature,
           sent_headers: headersConfig,
-          upstream_http_status: upstream.status
+          upstream_http_status: upstream.status,
+          upstream_status_text: upstream.statusText
         },
-        upstream_response: resData || rawText
+        upstream_raw_response: rawText
+      }, null, 2), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    let resData: any = null;
+    try {
+      resData = JSON.parse(rawText);
+    } catch {
+      // 说明耀虎 API 返回的不是 JSON（通常是 403 网页或防火墙拦截）
+      return new Response(JSON.stringify({
+        error: "耀虎 API 未返回有效的 JSON 结构（可能触发了 API 防火墙/IP 拦截）",
+        upstream_http_status: upstream.status,
+        upstream_raw_text: rawText
       }), {
         status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
       });
     }
 
-    // 判断耀虎 API 响应状态
-    if (resData && (resData.code == 200 || resData.code == "200" || resData.code == 1 || resData.success === true)) {
-      const rawInfo = resData.data || resData.info || resData;
-      
-      if (rawInfo) {
-        const items = Array.isArray(rawInfo) ? rawInfo : [rawInfo];
-        const validItems = items.filter(item => item && (item.name || item.title || item.songname || item.play_url || item.url || item.cover));
+    // 解析耀虎返回的数据
+    if (resData && (resData.code == 200 || resData.code == "200" || resData.code == 1) && resData.data) {
+      const rawInfo = resData.data;
+      const items = Array.isArray(rawInfo) ? rawInfo : [rawInfo];
+      const validItems = items.filter(item => item && (item.name || item.title || item.songname || item.play_url || item.url));
 
-        if (validItems.length > 0) {
-          if (types === "search") {
-            const searchResults = validItems.map((item) => {
-              const title = item.name || item.title || item.songname || keyword;
-              const author = item.singer || item.artist || item.author || "未知歌手";
-              const songId = `${title} - ${author}`;
-              return {
-                id: songId,
-                name: title,
-                artist: [author],
-                album: item.album || title,
-                pic_id: songId,
-                url_id: songId,
-                lyric_id: songId,
-                source: "kugou"
-              };
-            });
+      if (validItems.length > 0) {
+        if (types === "search") {
+          const searchResults = validItems.map((item) => {
+            const title = item.name || item.title || item.songname || keyword;
+            const author = item.singer || item.artist || item.author || "未知歌手";
+            const songId = `${title} - ${author}`;
+            return {
+              id: songId,
+              name: title,
+              artist: [author],
+              album: item.album || title,
+              pic_id: songId,
+              url_id: songId,
+              lyric_id: songId,
+              source: "kugou"
+            };
+          });
 
-            return new Response(JSON.stringify(searchResults), {
-              status: 200,
-              headers: {
-                "Content-Type": "application/json; charset=utf-8",
-                "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "public, max-age=300"
-              }
-            });
-          } else if (types === "url") {
-            const playUrl = validItems[0].play_url || validItems[0].url || validItems[0].src || validItems[0].music_url;
-            if (playUrl) {
-              return new Response(JSON.stringify({ url: playUrl, br: 320 }), {
-                status: 200,
-                headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-              });
+          return new Response(JSON.stringify(searchResults), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Access-Control-Allow-Origin": "*",
+              "Cache-Control": "no-store"
             }
-          } else if (types === "pic") {
-            const picUrl = validItems[0].cover || validItems[0].pic || validItems[0].img;
-            if (picUrl) {
-              return new Response(JSON.stringify({ url: picUrl }), {
-                status: 200,
-                headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-              });
-            }
-          } else if (types === "lyric") {
-            const lyricStr = validItems[0].lyric || validItems[0].lrc || "";
-            return new Response(JSON.stringify({ lyric: lyricStr, tlyric: "" }), {
-              status: 200,
-              headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
-            });
-          }
+          });
+        } else if (types === "url") {
+          const playUrl = validItems[0].play_url || validItems[0].url || validItems[0].src;
+          return new Response(JSON.stringify({ url: playUrl || "", br: 320 }), {
+            status: 200,
+            headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+          });
+        } else if (types === "pic") {
+          const picUrl = validItems[0].cover || validItems[0].pic || validItems[0].img;
+          return new Response(JSON.stringify({ url: picUrl || "" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+          });
+        } else if (types === "lyric") {
+          const lyricStr = validItems[0].lyric || validItems[0].lrc || "";
+          return new Response(JSON.stringify({ lyric: lyricStr, tlyric: "" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+          });
         }
       }
     }
-  } catch (err) {
-    console.error("[Yaohud API Error]", err);
-  }
 
-  // 耀虎 API 未查到或报错时，返回 null 触发默认后端代理
-  return null;
+    // 如果耀虎 API 返回了业务错误码（如 code: 400，msg: "签名不正确"），直接展示
+    return new Response(JSON.stringify({
+      error: "耀虎 API 返回业务异常",
+      yaohud_response: resData
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+    });
+
+  } catch (err: any) {
+    return new Response(JSON.stringify({
+      error: "Worker 抓取耀虎 API 时发生网络异常",
+      details: err?.message || String(err)
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+    });
+  }
 }
 
-async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise: Promise<any>) => void, apiBaseUrl: string = DEFAULT_API_BASE_URL): Promise<Response> {
-  const cache = caches.default;
-  
-  const cacheUrl = new URL(url.toString());
-  cacheUrl.searchParams.delete("s");
-  cacheUrl.searchParams.delete("nocache");
-  cacheUrl.searchParams.delete("debug");
-  
-  const cacheKey = new Request(cacheUrl.toString(), {
-    method: request.method,
-    headers: request.headers
-  });
-
-  const bypassCache = url.searchParams.get("nocache") === "true" || url.searchParams.get("debug") === "true";
-  if (request.method === "GET" && !bypassCache) {
-    try {
-      const cachedResponse = await cache.match(cacheKey);
-      if (cachedResponse) {
-        console.log(`[Cache HIT] ${url.toString()}`);
-        const response = new Response(cachedResponse.body, cachedResponse);
-        response.headers.set("X-Cache-Status", "HIT");
-        response.headers.set("Access-Control-Expose-Headers", "X-Cache-Status");
-        return response;
-      }
-    } catch (err) {
-      console.warn(`[Cache ERROR] ${url.toString()}`, err);
-    }
-  }
-
-  // 兼容 source=kugou 或 site=kugou 两种前端传参
+async function proxyApiRequest(url: URL, request: Request, apiBaseUrl: string = DEFAULT_API_BASE_URL): Promise<Response> {
   const sourceParam = url.searchParams.get("source") || url.searchParams.get("site");
+  
+  // 命中酷狗源，强制走 handleKugouApiRequest 处理
   if (sourceParam === "kugou") {
-    const kugouResponse = await handleKugouApiRequest(url, request);
-    if (kugouResponse) {
-      if (waitUntil && request.method === "GET" && !bypassCache && kugouResponse.status === 200) {
-        waitUntil(cache.put(cacheKey, kugouResponse.clone()));
-      }
-      return kugouResponse;
-    }
+    return await handleKugouApiRequest(url, request);
   }
 
-  console.log(`[Cache MISS] Fetching from upstream: ${url.toString()}`);
-
+  // 其他源走默认后端代理
   const apiUrl = new URL(apiBaseUrl);
   url.searchParams.forEach((value, key) => {
     if (key === "target" || key === "callback" || key === "s" || key === "nocache" || key === "debug") {
@@ -290,10 +270,6 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
     }
     apiUrl.searchParams.set(key, value);
   });
-
-  if (!apiUrl.searchParams.has("types")) {
-    return new Response("Missing types", { status: 400 });
-  }
 
   const upstream = await fetch(apiUrl.toString(), {
     headers: {
@@ -304,44 +280,16 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
 
   const responseText = await upstream.text();
   const headers = createCorsHeaders(upstream.headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json; charset=utf-8");
-  }
+  headers.set("Content-Type", "application/json; charset=utf-8");
 
-  headers.set("X-Cache-Status", "MISS");
-  headers.set("Access-Control-Expose-Headers", "X-Cache-Status");
-
-  const isSearch = url.searchParams.get("types") === "search";
-  const isEmptyResult = responseText.trim() === "[]";
-  const isError = responseText.includes('"error"') || responseText.includes('"status":0');
-  
-  let shouldCache = upstream.status === 200 && request.method === "GET" && !isError && !bypassCache;
-  
-  if (isSearch && isEmptyResult) {
-    shouldCache = false;
-  }
-
-  if (shouldCache) {
-    headers.set("Cache-Control", "public, s-maxage=300, max-age=300");
-  } else {
-    headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
-  }
-
-  const response = new Response(responseText, {
+  return new Response(responseText, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers,
   });
-
-  if (shouldCache && waitUntil) {
-    waitUntil(cache.put(cacheKey, response.clone()));
-    console.log(`[Cache PUT] Saved to cache: ${url.toString()}`);
-  }
-
-  return response;
 }
 
-export async function onRequest({ request, waitUntil, env }: { request: Request, waitUntil: (promise: Promise<any>) => void, env: any }): Promise<Response> {
+export async function onRequest({ request, env }: { request: Request, env: any }): Promise<Response> {
   const apiBaseUrl = (typeof env?.API_BASE_URL === "string" && env.API_BASE_URL) ? env.API_BASE_URL : DEFAULT_API_BASE_URL;
   if (request.method === "OPTIONS") {
     return handleOptions();
@@ -358,5 +306,5 @@ export async function onRequest({ request, waitUntil, env }: { request: Request,
     return proxyKuwoAudio(target, request);
   }
 
-  return proxyApiRequest(url, request, waitUntil, apiBaseUrl);
+  return proxyApiRequest(url, request, apiBaseUrl);
 }
