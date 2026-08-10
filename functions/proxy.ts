@@ -4,20 +4,26 @@ const SAFE_RESPONSE_HEADERS = ["content-type", "cache-control", "accept-ranges",
 
 // ================= 耀虎 API 配置 (酷狗源) =================
 const YAOHUD_API_KEY = "Z2mDyU4rUTUEBbPYdbK";
-const YAOHUD_SECRET_KEY = "fbda8f0550be131b05d22dc0d0ad3e4b";
+// 🎯 已根据你提供的 PHP 示例更新 Secret Key
+const YAOHUD_SECRET_KEY = "75da5a53198ed28ece7d1d4e9cf381d1";
 
 /**
- * 辅助函数：生成 HMAC-SHA256 加密签名（符合 PHP 代码签名规则）
+ * 辅助函数：生成 HMAC-SHA256 加密签名（严格对应 PHP 的 hash_hmac('sha256', $signString, $secretKey)）
  */
 async function generateSignature(apiKey: string, secretKey: string, timestamp: number): Promise<string> {
+  // PHP 规则：$signString = "key={$apiKey}&timestamp={$timestamp}";
   const signString = `key=${apiKey}&timestamp=${timestamp}`;
   const encoder = new TextEncoder();
   const keyData = encoder.encode(secretKey);
   const msgData = encoder.encode(signString);
 
-  // 使用 Web Crypto 计算 HMAC-SHA256
+  // 使用 Web Crypto API 计算 HMAC-SHA256
   const cryptoKey = await crypto.subtle.importKey(
-    "raw", keyData, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+    "raw", 
+    keyData, 
+    { name: "HMAC", hash: "SHA-256" }, 
+    false, 
+    ["sign"]
   );
   const signatureBuffer = await crypto.subtle.sign("HMAC", cryptoKey, msgData);
   
@@ -113,23 +119,19 @@ async function proxyKuwoAudio(targetUrl: string, request: Request): Promise<Resp
 async function handleKugouApiRequest(url: URL, request: Request): Promise<Response | null> {
   const types = url.searchParams.get("types");
   
-  // 🎯【修改点 1】：兼容更多关键词获取途径（name, keyword, s, id）
+  // 兼容前端传参（name / keyword / s / id）
   const name = url.searchParams.get("name") || "";
   const keywordParam = url.searchParams.get("keyword") || "";
   const searchS = url.searchParams.get("s") || "";
   const id = url.searchParams.get("id") || "";
   const keyword = name || keywordParam || searchS || id;
 
-  // 🎯【修改点 2】：增加调试模式
   const isDebug = url.searchParams.get("debug") === "true";
 
   if (!keyword) {
     if (types === "search") {
-      return new Response(JSON.stringify({ 
-        error: "缺少关键词参数", 
-        hint: "请在请求中传入 name、keyword 或 s 参数" 
-      }), {
-        status: 400,
+      return new Response(JSON.stringify([]), {
+        status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
       });
     }
@@ -139,22 +141,40 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
   const targetUrl = `https://api.yaohud.cn/api/music/kg?key=${YAOHUD_API_KEY}&msg=${encodeURIComponent(keyword)}&n=1&quality=320&type=json`;
 
   try {
+    // 1. 获取当前秒级 UNIX 时间戳
     const timestamp = Math.floor(Date.now() / 1000);
+    // 2. 生成 HMAC-SHA256 签名
     const signature = await generateSignature(YAOHUD_API_KEY, YAOHUD_SECRET_KEY, timestamp);
 
-    // 发起带 3 个加密 Headers 的请求
-    const upstream = await fetch(targetUrl, {
-      headers: {
-        "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
-        "X-Api-Key": YAOHUD_API_KEY,
-        "X-Api-Timestamp": timestamp.toString(),
-        "X-Api-Sign": signature
-      }
-    });
+    // 3. 构建完全匹配 PHP 示例的请求头
+    const headersConfig: Record<string, string> = {
+      "User-Agent": request.headers.get("User-Agent") ?? "Mozilla/5.0",
+      "X-Api-Key": YAOHUD_API_KEY,
+      "X-Api-Timestamp": timestamp.toString(),
+      "X-Api-Sign": signature,
+      "Content-Type": "application/json"
+    };
 
-    const resData = await upstream.json() as any;
+    const upstream = await fetch(targetUrl, { headers: headersConfig });
 
-    // 🎯【调试输出】：如果带了 &debug=true，直接原样返回耀虎 API 响应结果
+    // 先读取文本内容，防止上游返回非 JSON（如网页拦截页）时导致程序崩溃
+    const rawText = await upstream.text();
+    let resData: any = null;
+
+    try {
+      resData = JSON.parse(rawText);
+    } catch {
+      console.error("[Kugou Upstream Raw Text Response]", rawText);
+      return new Response(JSON.stringify({
+        error: "耀虎 API 响应异常",
+        details: rawText.trim()
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    // 🎯 调试模式输出
     if (isDebug) {
       return new Response(JSON.stringify({
         debug_info: {
@@ -162,7 +182,8 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
           targetUrl,
           timestamp,
           signature,
-          upstream_status: upstream.status
+          sent_headers: headersConfig,
+          upstream_http_status: upstream.status
         },
         upstream_response: resData
       }), {
@@ -171,12 +192,11 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
       });
     }
 
-    // 🎯【修改点 3】：宽松匹配 code（兼容数字 200 和字符串 "200"）
+    // 判断响应状态 code (兼容数字 200 和字符串 "200")
     if (resData && (resData.code == 200 || resData.code == "200") && resData.data) {
       const info = resData.data;
       let resultData: any = null;
 
-      // 1. 搜索音乐
       if (types === "search") {
         resultData = [{
           id: `${info.name} - ${info.singer}`,
@@ -188,17 +208,11 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
           lyric_id: `${info.name} - ${info.singer}`,
           source: "kugou"
         }];
-      } 
-      // 2. 获取播放链接
-      else if (types === "url") {
+      } else if (types === "url") {
         resultData = { url: info.play_url, br: 320 };
-      } 
-      // 3. 获取专辑封面
-      else if (types === "pic") {
+      } else if (types === "pic") {
         resultData = { url: info.cover };
-      } 
-      // 4. 获取歌词
-      else if (types === "lyric") {
+      } else if (types === "lyric") {
         resultData = { lyric: info.lyric || "", tlyric: "" };
       }
 
@@ -212,35 +226,39 @@ async function handleKugouApiRequest(url: URL, request: Request): Promise<Respon
           }
         });
       }
-    } else {
-      console.warn("[Kugou API Non-200]", resData);
-      // 🎯【修改点 4】：抛出具体错误提示，便于定位是 Key 错误还是 API 问题
-      return new Response(JSON.stringify({
-        error: "上游 API 返回错误",
-        upstream_data: resData
-      }), {
-        status: 500,
+    }
+
+    // 上游无数据时返回空数组
+    if (types === "search") {
+      return new Response(JSON.stringify([]), {
+        status: 200,
         headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
       });
     }
+
+    return new Response(JSON.stringify({ error: "未找到相关音乐资源", upstream_data: resData }), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+    });
+
   } catch (err: any) {
     console.error("[Kugou Request Error]", err);
-    return new Response(JSON.stringify({
-      error: "Worker 请求上游异常",
-      message: err?.message || String(err)
-    }), {
-      status: 500,
+    if (types === "search") {
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+    return new Response(JSON.stringify({ error: "Worker 运行异常", message: err?.message || String(err) }), {
+      status: 200,
       headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*" }
     });
   }
-
-  return null;
 }
 
 async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise: Promise<any>) => void, apiBaseUrl: string = DEFAULT_API_BASE_URL): Promise<Response> {
   const cache = caches.default;
   
-  // 构建缓存 Key（过滤掉随机签名 s 以及强制刷新标记 nocache）
   const cacheUrl = new URL(url.toString());
   cacheUrl.searchParams.delete("s");
   cacheUrl.searchParams.delete("nocache");
@@ -251,7 +269,6 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
     headers: request.headers
   });
 
-  // 如果是 GET 请求且未指定 nocache 强制刷新，尝试命中缓存
   const bypassCache = url.searchParams.get("nocache") === "true" || url.searchParams.get("debug") === "true";
   if (request.method === "GET" && !bypassCache) {
     try {
@@ -268,11 +285,9 @@ async function proxyApiRequest(url: URL, request: Request, waitUntil?: (promise:
     }
   }
 
-  // 特殊判断：如果前端请求的是酷狗 (source=kugou)，走带有 HMAC 加密的耀虎 API
   if (url.searchParams.get("source") === "kugou") {
     const kugouResponse = await handleKugouApiRequest(url, request);
     if (kugouResponse) {
-      // 同样支持 Edge 边缘缓存（仅在非 500 且未开启 debug 时缓存）
       if (waitUntil && request.method === "GET" && !bypassCache && kugouResponse.status === 200) {
         waitUntil(cache.put(cacheKey, kugouResponse.clone()));
       }
