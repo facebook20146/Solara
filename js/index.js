@@ -770,6 +770,9 @@ const savedCurrentPlaylist = (() => {
 })();
 
 // API配置 - 修复API地址和请求方式
+// API配置 - 适配 QQ 音乐浏览器直连 (绕过 Worker 防火墙拦截)
+const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
+
 const API = {
     baseUrl: "/proxy",
 
@@ -814,6 +817,49 @@ const API = {
     },
 
     search: async (keyword, source = "netease", count = 20, page = 1) => {
+        // ================= 1. QQ 音乐浏览器直连模式 =================
+        if (source === "qq" || source === "tencent") {
+            const jkUrl = `https://jkapi.com/api/music?plat=qq&type=json&apiKey=${JK_API_KEY}&name=${encodeURIComponent(keyword)}`;
+            debugLog(`[QQ音乐直连] API请求: ${jkUrl}`);
+
+            try {
+                const resData = await API.fetchJson(jkUrl);
+                debugLog(`[QQ音乐直连] API响应: ${JSON.stringify(resData).substring(0, 200)}...`);
+
+                if (resData && (resData.code === 1 || resData.code === 200) && (resData.music_url || resData.url)) {
+                    const songTitle = resData.name || keyword;
+                    const songArtist = resData.artist || "未知歌手";
+                    const songAlbum = resData.album || songTitle;
+                    const playUrl = resData.music_url || resData.url;
+                    const picUrl = resData.pic || resData.cover || "";
+                    const lyricStr = resData.lyric || resData.lrc || "";
+
+                    const songItem = {
+                        id: `qq_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                        name: songTitle,
+                        artist: Array.isArray(songArtist) ? songArtist : [songArtist],
+                        album: songAlbum,
+                        pic_id: picUrl,
+                        url_id: playUrl,
+                        lyric_id: lyricStr,
+                        source: "qq",
+                        _directUrl: playUrl,
+                        _directPic: picUrl,
+                        _directLyric: lyricStr
+                    };
+
+                    return [songItem];
+                } else {
+                    debugLog(`[QQ音乐直连] 未搜索到有效结果`);
+                    return [];
+                }
+            } catch (err) {
+                debugLog(`[QQ音乐直连] 请求失败: ${err.message}`);
+                return [];
+            }
+        }
+
+        // ================= 2. 其他音乐源依然走 Worker 代理 =================
         const signature = API.generateSignature();
         const url = `${API.baseUrl}?types=search&source=${source}&name=${encodeURIComponent(keyword)}&count=${count}&pages=${page}&s=${signature}`;
 
@@ -894,16 +940,26 @@ const API = {
     },
 
     getSongUrl: (song, quality = "320") => {
+        if (song.source === "qq" && (song._directUrl || song.url_id?.startsWith("http"))) {
+            return song._directUrl || song.url_id;
+        }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=url&id=${song.id}&source=${song.source || "netease"}&br=${quality}&s=${signature}`;
     },
 
     getLyric: (song) => {
+        if (song.source === "qq" && song._directLyric !== undefined) {
+            const lyricObj = { lyric: song._directLyric || "", tlyric: "" };
+            return "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(lyricObj));
+        }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=lyric&id=${song.lyric_id || song.id}&source=${song.source || "netease"}&s=${signature}`;
     },
 
     getPicUrl: (song) => {
+        if (song.source === "qq" && (song._directPic || song.pic_id?.startsWith("http"))) {
+            return song._directPic || song.pic_id;
+        }
         const signature = API.generateSignature();
         return `${API.baseUrl}?types=pic&id=${song.pic_id}&source=${song.source || "netease"}&size=300&s=${signature}`;
     }
