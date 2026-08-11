@@ -832,12 +832,12 @@ function isValidAudioUrl(url) {
 }
 
 /**
- * 从妖狐单曲响应数据中提取音频直链
+ * 从妖狐响应数据中提取音频直链
  */
 function extractAudioUrlFromYaohud(dataObj) {
     if (!dataObj || typeof dataObj !== 'object') return '';
 
-    // 优先取 vipmusic.url (官方文档标准字段)
+    // 优先取 vipmusic.url
     if (dataObj.vipmusic && typeof dataObj.vipmusic === 'object') {
         let vipUrl = dataObj.vipmusic.url || dataObj.vipmusic.music_url || '';
         if (vipUrl && isValidAudioUrl(vipUrl)) return vipUrl;
@@ -852,79 +852,53 @@ function extractAudioUrlFromYaohud(dataObj) {
 }
 
 /**
- * 妖狐 API 基于文档规范的【搜索 ➔ RID ➔ 单曲直链】精准获取模式
+ * 妖狐 API 干净请求（严格不传 action/size，规避 400 报错）
  */
-async function fetchYaohudByDocSpec(platName, keyword, platLabel) {
+async function fetchYaohudClean(platName, keyword, platLabel) {
     const headers = await getYaohudHeaders(YAOHUD_API_KEY, YAOHUD_SECRET_KEY);
 
-    // 【步骤 1】搜索模式 (action=so) 获取歌曲列表及 RID
-    const searchUrl = `https://api.yaohud.cn/api/music/${platName}?msg=${encodeURIComponent(keyword)}&action=so&g=5&key=${YAOHUD_API_KEY}`;
-    debugLog(`[${platLabel}搜索模式] 请求列表: ${searchUrl}`);
+    // 轮询尝试第 1 到 3 项
+    for (let n = 1; n <= 3; n++) {
+        const cleanUrl = `https://api.yaohud.cn/api/music/${platName}?msg=${encodeURIComponent(keyword)}&n=${n}&key=${YAOHUD_API_KEY}`;
+        debugLog(`[${platLabel}妖狐API] 尝试获取第 ${n} 首: ${cleanUrl}`);
 
-    try {
-        const searchResp = await fetch(searchUrl, { method: 'GET', headers: headers });
-        if (!searchResp.ok) throw new Error(`HTTP ${searchResp.status}`);
-        
-        const searchResult = await searchResp.json();
-        const songs = searchResult?.data?.songs || searchResult?.songs || [];
+        try {
+            const resp = await fetch(cleanUrl, { method: 'GET', headers: headers });
+            if (!resp.ok) continue;
 
-        if (!Array.isArray(songs) || songs.length === 0) {
-            debugLog(`[${platLabel}搜索模式] 未找到相关歌曲列表，尝试直接使用 n=1 降级处理...`);
-            return null;
-        }
+            const json = await resp.json();
+            debugLog(`[${platLabel}妖狐API] 响应数据: ${JSON.stringify(json).substring(0, 150)}...`);
 
-        debugLog(`[${platLabel}搜索模式] 成功找到 ${songs.length} 首歌曲，准备按 RID 换取播放直链...`);
+            if (json && (json.code === 200 || json.code === 1)) {
+                const songData = json.data || json;
+                const playUrl = extractAudioUrlFromYaohud(songData);
 
-        // 【步骤 2】循环尝试列表前 3 首歌曲的 RID，并结合 size 音质参数换取直链
-        for (let i = 0; i < Math.min(songs.length, 3); i++) {
-            const targetSong = songs[i];
-            const songRid = targetSong.rid || targetSong.id;
-            
-            if (!songRid) continue;
+                if (playUrl) {
+                    const songTitle = songData.name || songData.title || keyword;
+                    const songArtist = songData.songname || songData.singer || songData.artist || "未知歌手";
+                    const songAlbum = songData.album || songTitle;
+                    const picUrl = songData.picture || songData.cover || songData.pic || "";
+                    let lyricStr = songData.lyric || songData.lrc || "[00:00.00] 暂无歌词\n";
 
-            // 尝试音质：优先 SQ (320k)，失败则退回 Standard (128k)
-            const qualities = ['SQ', 'Standard', 'lossless'];
-            for (const quality of qualities) {
-                const songUrl = `https://api.yaohud.cn/api/music/${platName}?action=song&id=${encodeURIComponent(songRid)}&size=${quality}&key=${YAOHUD_API_KEY}`;
-                debugLog(`[${platLabel}单曲模式] 尝试 RID: ${songRid} | 音质: ${quality} -> ${songUrl}`);
-
-                try {
-                    const songResp = await fetch(songUrl, { method: 'GET', headers: headers });
-                    if (!songResp.ok) continue;
-
-                    const songJson = await songResp.json();
-                    const songData = songJson.data || songJson;
-                    const playUrl = extractAudioUrlFromYaohud(songData);
-
-                    if (songJson && (songJson.code === 200 || songJson.code === 1) && playUrl) {
-                        const songTitle = songData.name || targetSong.name || keyword;
-                        const songArtist = songData.songname || targetSong.singer || "未知歌手";
-                        const songAlbum = songData.album || targetSong.album || songTitle;
-                        const picUrl = songData.picture || songData.cover || "";
-                        const lyricStr = "[00:00.00] 播放成功\n";
-
-                        debugLog(`[${platLabel}单曲模式] 🎉 成功获取到真实音频直链！URL: ${playUrl}`);
-                        return [{
-                            id: `${platName}_${songRid}`,
-                            name: songTitle,
-                            artist: Array.isArray(songArtist) ? songArtist : [songArtist],
-                            album: songAlbum,
-                            pic_id: picUrl,
-                            url_id: playUrl,
-                            lyric_id: lyricStr,
-                            source: platName,
-                            _directUrl: playUrl,
-                            _directPic: picUrl,
-                            _directLyric: lyricStr
-                        }];
-                    }
-                } catch (err) {
-                    debugLog(`[${platLabel}单曲模式] RID ${songRid} (${quality}) 请求异常: ${err.message}`);
+                    debugLog(`[${platLabel}妖狐API] 🎉 成功获取直链！URL: ${playUrl}`);
+                    return [{
+                        id: `${platName}_${Date.now()}_${n}`,
+                        name: songTitle,
+                        artist: Array.isArray(songArtist) ? songArtist : [songArtist],
+                        album: songAlbum,
+                        pic_id: picUrl,
+                        url_id: playUrl,
+                        lyric_id: lyricStr,
+                        source: platName,
+                        _directUrl: playUrl,
+                        _directPic: picUrl,
+                        _directLyric: lyricStr
+                    }];
                 }
             }
+        } catch (err) {
+            debugLog(`[${platLabel}妖狐API] 第 ${n} 首请求失败: ${err.message}`);
         }
-    } catch (e) {
-        debugLog(`[${platLabel}精准模式] 执行失败: ${e.message}`);
     }
 
     return null;
@@ -983,8 +957,20 @@ const API = {
     },
 
     search: async (keyword, source = "netease", count = 20, page = 1) => {
+        // 1. 规范化源平台名称映射 (确保发给 Worker 代理时也是后端认识的简称)
+        const sourceMap = {
+            'kugou': 'kg',
+            'kg': 'kg',
+            'kuwo': 'kw',
+            'kw': 'kw',
+            'tencent': 'qq',
+            'qq': 'qq',
+            'netease': 'netease'
+        };
+        const normalizedSource = sourceMap[source] || source;
+
         // ================= 1. QQ 音乐浏览器直连模式 =================
-        if (source === "qq" || source === "tencent") {
+        if (normalizedSource === "qq") {
             const jkUrl = `https://jkapi.com/api/music?plat=qq&type=json&apiKey=${JK_API_KEY}&name=${encodeURIComponent(keyword)}`;
             debugLog(`[QQ音乐直连] API请求: ${jkUrl}`);
 
@@ -1021,23 +1007,21 @@ const API = {
             }
         }
 
-        // ================= 2. 酷狗/酷我音乐 (按官方规范 RID 精准解析模式) =================
-        if (source === "kg" || source === "kugou" || source === "kw" || source === "kuwo") {
-            const platName = (source === "kg" || source === "kugou") ? "kg" : "kuwo";
-            const platLabel = (platName === "kg") ? "酷狗" : "酷我";
+        // ================= 2. 酷狗/酷我音乐 (妖狐 API 干净解析) =================
+        if (normalizedSource === "kg" || normalizedSource === "kw") {
+            const platLabel = (normalizedSource === "kg") ? "酷狗" : "酷我";
 
-            // 执行符合官方文档规范的两阶段检索 (action=so 获取 RID -> action=song 获取直链)
-            const docSpecResult = await fetchYaohudByDocSpec(platName, keyword, platLabel);
-            if (docSpecResult) {
-                return docSpecResult;
+            const yaohudResult = await fetchYaohudClean(normalizedSource, keyword, platLabel);
+            if (yaohudResult) {
+                return yaohudResult;
             }
 
-            debugLog(`[${platLabel}精准模式] 妖狐 API 未能解析出直链，正自动降级为 Worker 代理模式...`);
+            debugLog(`[${platLabel}] 妖狐 API 未解析出有效直链，正降级为 Worker 代理模式...`);
         }
 
-        // ================= 3. 通用 Worker 代理模式（降级兜底） =================
+        // ================= 3. 通用 Worker 代理模式 (使用归一化后的 normalizedSource) =================
         const signature = API.generateSignature();
-        const url = `${API.baseUrl}?types=search&source=${source}&name=${encodeURIComponent(keyword)}&count=${count}&pages=${page}&s=${signature}`;
+        const url = `${API.baseUrl}?types=search&source=${normalizedSource}&name=${encodeURIComponent(keyword)}&count=${count}&pages=${page}&s=${signature}`;
 
         try {
             debugLog(`[Worker代理请求]: ${url}`);
