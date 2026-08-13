@@ -840,13 +840,11 @@ function isValidAudioUrl(url) {
 function extractAudioUrlFromYaohud(dataObj) {
     if (!dataObj || typeof dataObj !== 'object') return '';
 
-    // 优先取 vipmusic.url
     if (dataObj.vipmusic && typeof dataObj.vipmusic === 'object') {
         let vipUrl = dataObj.vipmusic.url || dataObj.vipmusic.music_url || '';
         if (vipUrl && isValidAudioUrl(vipUrl)) return vipUrl;
     }
 
-    // 兜底直接字段
     const directKeys = ['url', 'music_url', 'music', 'play_url', 'audio', 'link'];
     let directUrl = getFieldValue(dataObj, directKeys);
     if (directUrl && isValidAudioUrl(directUrl)) return directUrl;
@@ -907,7 +905,7 @@ async function fetchYaohudClean(platName, keyword, platLabel) {
 }
 
 /**
- * 残影 API 请求（支持解析 play_url、lrc 结构）
+ * 残影 API 请求
  */
 async function fetchCanyingClean(keyword) {
     for (let n = 1; n <= 3; n++) {
@@ -916,21 +914,19 @@ async function fetchCanyingClean(keyword) {
 
         try {
             const resData = await API.fetchJson(canyingUrl);
-            debugLog(`[残影API] 响应数据: ${JSON.stringify(resData).substring(0, 150)}...`);
+            debugLog(`[残影API] 真实响应数据: ${JSON.stringify(resData).substring(0, 150)}...`);
 
-            if (resData && resData.code === 200 && resData.data) {
+            if (resData && (resData.code === 200 || resData.code === 1) && resData.data) {
                 const songData = resData.data;
-                const playUrl = songData.play_url || '';
+                const playUrl = songData.play_url || songData.url || '';
                 
                 const songTitle = songData.name || keyword;
                 const songArtist = songData.artist || "未知歌手";
                 const songAlbum = songData.album || songTitle;
-                const picUrl = songData.cover || "";
+                const picUrl = songData.cover || songData.pic || "";
                 
-                // 自动处理残影的歌词结构
-                let lyricStr = songData.lyrics?.formatted || songData.lyrics?.combined || songData.lyrics?.original_lyrics || "[00:00.00] 暂无歌词\n";
+                let lyricStr = songData.lyrics?.formatted || songData.lyrics?.combined || songData.lyrics?.original_lyrics || songData.lrc || "[00:00.00] 暂无歌词\n";
 
-                // 优先选取获取到有效音源直链的结果
                 if (playUrl && isValidAudioUrl(playUrl)) {
                     debugLog(`[残影API] 🎉 成功获取直链！URL: ${playUrl}`);
                     return [{
@@ -947,7 +943,7 @@ async function fetchCanyingClean(keyword) {
                         _directLyric: lyricStr
                     }];
                 } else {
-                    debugLog(`[残影API] 第 ${n} 首返回了空音频链接 (play_url 为 null)`);
+                    debugLog(`[残影API] 第 ${n} 首 play_url 无效或为空`);
                 }
             }
         } catch (err) {
@@ -965,6 +961,7 @@ const API = {
         return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
     },
 
+    // 🛠️ 关键修复：精细区分“API接口请求”与“媒体音频直链”
     fetchJson: async (url) => {
         if (typeof url === "string" && url.startsWith("data:application/json")) {
             try {
@@ -976,15 +973,21 @@ const API = {
             }
         }
 
-        // 注意：排除 apicx.asia / jkapi.com / proxy，避免将 API 接口请求误判为 MP3 媒体直链
-        if (typeof url === "string" && (
+        // 明确标注所有第三方 API 域名，绝不拦截它们
+        const isApiEndpoint = typeof url === "string" && (
+            url.includes("/proxy") || 
+            url.includes("jkapi.com") || 
+            url.includes("apicx.asia") || 
+            url.includes("api.yaohud.cn")
+        );
+
+        // 只有非 API 请求且明确是 CDN 音频文件链接时，才直接包装返回
+        if (typeof url === "string" && !isApiEndpoint && (
             url.includes(".mp3") || 
-            url.includes("qqmusic") || 
+            url.includes(".flac") || 
             url.includes("tc.qq.com") || 
-            url.includes("kugou.com") ||
-            url.includes("kuwo.cn") ||
-            url.includes("api.yaohud.cn") ||
-            (!url.includes("/proxy") && !url.includes("jkapi.com") && !url.includes("apicx.asia") && url.startsWith("http"))
+            (url.includes("kugou.com") && !url.includes("api")) ||
+            (url.includes("kuwo.cn") && !url.includes("api"))
         )) {
             return { url: url, br: 320 };
         }
@@ -1012,7 +1015,6 @@ const API = {
     },
 
     search: async (keyword, source = "netease", count = 20, page = 1) => {
-        // 1. 规范化源平台名称映射
         const sourceMap = {
             'kugou': 'kg',
             'kg': 'kg',
@@ -1032,8 +1034,6 @@ const API = {
 
             try {
                 const resData = await API.fetchJson(jkUrl);
-                debugLog(`[QQ音乐直连] API响应: ${JSON.stringify(resData).substring(0, 200)}...`);
-
                 if (resData && (resData.code === 1 || resData.code === 200) && (resData.music_url || resData.url)) {
                     const songTitle = resData.name || keyword;
                     const songArtist = resData.artist || "未知歌手";
@@ -1055,8 +1055,6 @@ const API = {
                         _directPic: picUrl,
                         _directLyric: lyricStr
                     }];
-                } else {
-                    debugLog(`[QQ音乐直连] 未搜索到有效结果，降级至 Worker 代理...`);
                 }
             } catch (err) {
                 debugLog(`[QQ音乐直连] 请求失败: ${err.message}，降级至 Worker 代理...`);
@@ -1092,8 +1090,6 @@ const API = {
         try {
             debugLog(`[Worker代理请求]: ${url}`);
             const data = await API.fetchJson(url);
-            debugLog(`[Worker代理响应]: ${JSON.stringify(data).substring(0, 200)}...`);
-
             if (!Array.isArray(data)) throw new Error("搜索结果格式错误");
 
             return data.map(song => ({
