@@ -961,7 +961,6 @@ const API = {
         return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
     },
 
-    // 🛠️ 关键修复：精细区分“API接口请求”与“媒体音频直链”
     fetchJson: async (url) => {
         if (typeof url === "string" && url.startsWith("data:application/json")) {
             try {
@@ -973,7 +972,6 @@ const API = {
             }
         }
 
-        // 明确标注所有第三方 API 域名，绝不拦截它们
         const isApiEndpoint = typeof url === "string" && (
             url.includes("/proxy") || 
             url.includes("jkapi.com") || 
@@ -981,7 +979,6 @@ const API = {
             url.includes("api.yaohud.cn")
         );
 
-        // 只有非 API 请求且明确是 CDN 音频文件链接时，才直接包装返回
         if (typeof url === "string" && !isApiEndpoint && (
             url.includes(".mp3") || 
             url.includes(".flac") || 
@@ -1176,9 +1173,15 @@ const API = {
         return `${API.baseUrl}?types=lyric&id=${song.lyric_id || song.id}&source=${song.source || "netease"}&s=${signature}`;
     },
 
+    // 🛠️ 关键修复：利用 wsrv.nl 图片代理为第三方 CDN 封面添加 CORS 跨域响应头
     getPicUrl: (song) => {
         if ((song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo" || song.source === "canying") && song._directPic) {
-            const json = JSON.stringify({ url: song._directPic });
+            let targetPic = song._directPic;
+            // 只要是 http/https 开头的第三方图片，全部通过跨域代理处理
+            if (targetPic && targetPic.startsWith("http")) {
+                targetPic = `https://wsrv.nl/?url=${encodeURIComponent(targetPic)}`;
+            }
+            const json = JSON.stringify({ url: targetPic });
             return "data:application/json;charset=utf-8," + encodeURIComponent(json);
         }
         const signature = API.generateSignature();
