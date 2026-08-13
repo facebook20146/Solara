@@ -652,7 +652,8 @@ const SOURCE_OPTIONS = [
     { value: "netease", label: "网易云音乐" },
     { value: "kugou", label: "酷狗音乐" },
     { value: "kuwo", label: "酷我音乐" },
-    { value: "joox", label: "JOOX音乐" }
+    { value: "joox", label: "JOOX音乐" },
+    { value: "canying", label: "残影" }
 ];
 
 function normalizeSource(value) {
@@ -775,13 +776,15 @@ const savedCurrentPlaylist = (() => {
 // API配置 - 完美适配 QQ 音乐直连与 MP3 音频解析
 // API配置 - 适配 QQ 音乐直连 (增强歌词字段兼容性与容错)
 // API配置 - 适配 QQ 音乐直连 (独创网易云歌词跨平台动态匹配技术)
-// API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直链
-// API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw) 浏览器直链
+// API配置 - 支持 QQ音乐、酷狗音乐(kg)、酷我音乐(kw)、残影音乐(canying)
 const JK_API_KEY = "017109b3debeda73f9b8b977758300ba";
 
 // yaohud API 鉴权配置
 const YAOHUD_API_KEY = "Z2mDyU4rUTUEBbPYdbK";
 const YAOHUD_SECRET_KEY = "75da5a53198ed28ece7d1d4e9cf381d1";
+
+// 残影 API 鉴权 Token
+const CANYING_TOKEN = "-8pV3nWYIYUbHDkFGaMaJw";
 
 /**
  * HMAC-SHA256 签名生成函数
@@ -852,12 +855,11 @@ function extractAudioUrlFromYaohud(dataObj) {
 }
 
 /**
- * 妖狐 API 干净请求（严格不传 action/size，规避 400 报错）
+ * 妖狐 API 干净请求
  */
 async function fetchYaohudClean(platName, keyword, platLabel) {
     const headers = await getYaohudHeaders(YAOHUD_API_KEY, YAOHUD_SECRET_KEY);
 
-    // 轮询尝试第 1 到 3 项
     for (let n = 1; n <= 3; n++) {
         const cleanUrl = `https://api.yaohud.cn/api/music/${platName}?msg=${encodeURIComponent(keyword)}&n=${n}&key=${YAOHUD_API_KEY}`;
         debugLog(`[${platLabel}妖狐API] 尝试获取第 ${n} 首: ${cleanUrl}`);
@@ -904,6 +906,58 @@ async function fetchYaohudClean(platName, keyword, platLabel) {
     return null;
 }
 
+/**
+ * 残影 API 请求（支持解析 play_url、lrc 结构）
+ */
+async function fetchCanyingClean(keyword) {
+    for (let n = 1; n <= 3; n++) {
+        const canyingUrl = `https://apicx.asia/api/qqmusic?token=${CANYING_TOKEN}&msg=${encodeURIComponent(keyword)}&n=${n}&br=320`;
+        debugLog(`[残影API] 尝试获取第 ${n} 首: ${canyingUrl}`);
+
+        try {
+            const resData = await API.fetchJson(canyingUrl);
+            debugLog(`[残影API] 响应数据: ${JSON.stringify(resData).substring(0, 150)}...`);
+
+            if (resData && resData.code === 200 && resData.data) {
+                const songData = resData.data;
+                const playUrl = songData.play_url || '';
+                
+                const songTitle = songData.name || keyword;
+                const songArtist = songData.artist || "未知歌手";
+                const songAlbum = songData.album || songTitle;
+                const picUrl = songData.cover || "";
+                
+                // 自动处理残影的歌词结构
+                let lyricStr = songData.lyrics?.formatted || songData.lyrics?.combined || songData.lyrics?.original_lyrics || "[00:00.00] 暂无歌词\n";
+
+                // 优先选取获取到有效音源直链的结果
+                if (playUrl && isValidAudioUrl(playUrl)) {
+                    debugLog(`[残影API] 🎉 成功获取直链！URL: ${playUrl}`);
+                    return [{
+                        id: `canying_${Date.now()}_${n}`,
+                        name: songTitle,
+                        artist: Array.isArray(songArtist) ? songArtist : [songArtist],
+                        album: songAlbum,
+                        pic_id: picUrl,
+                        url_id: playUrl,
+                        lyric_id: lyricStr,
+                        source: "canying",
+                        _directUrl: playUrl,
+                        _directPic: picUrl,
+                        _directLyric: lyricStr
+                    }];
+                } else {
+                    debugLog(`[残影API] 第 ${n} 首返回了空音频链接 (play_url 为 null)`);
+                }
+            }
+        } catch (err) {
+            debugLog(`[残影API] 第 ${n} 首请求失败: ${err.message}`);
+        }
+    }
+
+    return null;
+}
+
 const API = {
     baseUrl: "/proxy",
 
@@ -922,6 +976,7 @@ const API = {
             }
         }
 
+        // 注意：排除 apicx.asia / jkapi.com / proxy，避免将 API 接口请求误判为 MP3 媒体直链
         if (typeof url === "string" && (
             url.includes(".mp3") || 
             url.includes("qqmusic") || 
@@ -929,7 +984,7 @@ const API = {
             url.includes("kugou.com") ||
             url.includes("kuwo.cn") ||
             url.includes("api.yaohud.cn") ||
-            (!url.includes("/proxy") && !url.includes("jkapi.com") && url.startsWith("http"))
+            (!url.includes("/proxy") && !url.includes("jkapi.com") && !url.includes("apicx.asia") && url.startsWith("http"))
         )) {
             return { url: url, br: 320 };
         }
@@ -957,7 +1012,7 @@ const API = {
     },
 
     search: async (keyword, source = "netease", count = 20, page = 1) => {
-        // 1. 规范化源平台名称映射 (确保发给 Worker 代理时也是后端认识的简称)
+        // 1. 规范化源平台名称映射
         const sourceMap = {
             'kugou': 'kg',
             'kg': 'kg',
@@ -965,7 +1020,8 @@ const API = {
             'kw': 'kw',
             'tencent': 'qq',
             'qq': 'qq',
-            'netease': 'netease'
+            'netease': 'netease',
+            'canying': 'canying'
         };
         const normalizedSource = sourceMap[source] || source;
 
@@ -1007,7 +1063,17 @@ const API = {
             }
         }
 
-        // ================= 2. 酷狗/酷我音乐 (妖狐 API 干净解析) =================
+        // ================= 2. 残影 API 浏览器直连模式 =================
+        if (normalizedSource === "canying") {
+            const canyingResult = await fetchCanyingClean(keyword);
+            if (canyingResult) {
+                return canyingResult;
+            }
+
+            debugLog(`[残影API] 未解析出有效直链，正降级为 Worker 代理模式...`);
+        }
+
+        // ================= 3. 酷狗/酷我音乐 (妖狐 API 干净解析) =================
         if (normalizedSource === "kg" || normalizedSource === "kw") {
             const platLabel = (normalizedSource === "kg") ? "酷狗" : "酷我";
 
@@ -1019,7 +1085,7 @@ const API = {
             debugLog(`[${platLabel}] 妖狐 API 未解析出有效直链，正降级为 Worker 代理模式...`);
         }
 
-        // ================= 3. 通用 Worker 代理模式 (使用归一化后的 normalizedSource) =================
+        // ================= 4. 通用 Worker 代理模式 =================
         const signature = API.generateSignature();
         const url = `${API.baseUrl}?types=search&source=${normalizedSource}&name=${encodeURIComponent(keyword)}&count=${count}&pages=${page}&s=${signature}`;
 
@@ -1094,7 +1160,7 @@ const API = {
     },
 
     getSongUrl: (song, quality = "320") => {
-        if ((song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo") && song._directUrl) {
+        if ((song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo" || song.source === "canying") && song._directUrl) {
             return song._directUrl;
         }
         const signature = API.generateSignature();
@@ -1102,7 +1168,7 @@ const API = {
     },
 
     getLyric: (song) => {
-        if (song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo") {
+        if (song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo" || song.source === "canying") {
             let finalLrc = song._directLyric || song.lyric_id || "";
             if (!finalLrc || finalLrc.trim() === "") {
                 finalLrc = "[00:00.00] 暂无当前歌曲歌词\n";
@@ -1115,7 +1181,7 @@ const API = {
     },
 
     getPicUrl: (song) => {
-        if ((song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo") && song._directPic) {
+        if ((song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo" || song.source === "canying") && song._directPic) {
             const json = JSON.stringify({ url: song._directPic });
             return "data:application/json;charset=utf-8," + encodeURIComponent(json);
         }
