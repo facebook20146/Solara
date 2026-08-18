@@ -905,32 +905,31 @@ async function fetchYaohudClean(platName, keyword, platLabel) {
 }
 
 /**
- * 残影 API 请求
+ * 残影 API 请求 (支持并发获取多条搜索结果)
  */
-async function fetchCanyingClean(keyword) {
-    for (let n = 1; n <= 3; n++) {
+async function fetchCanyingClean(keyword, count = 10) {
+    debugLog(`[残影API] 开始并发请求前 ${count} 首歌曲...`);
+
+    // 并发生成 1 到 count 的请求队列
+    const fetchPromises = Array.from({ length: count }, (_, i) => i + 1).map(async (n) => {
         const canyingUrl = `https://apicx.asia/api/qqmusic?token=${CANYING_TOKEN}&msg=${encodeURIComponent(keyword)}&n=${n}&br=320`;
-        debugLog(`[残影API] 尝试获取第 ${n} 首: ${canyingUrl}`);
 
         try {
             const resData = await API.fetchJson(canyingUrl);
-            debugLog(`[残影API] 真实响应数据: ${JSON.stringify(resData).substring(0, 150)}...`);
-
             if (resData && (resData.code === 200 || resData.code === 1) && resData.data) {
                 const songData = resData.data;
                 const playUrl = songData.play_url || songData.url || '';
-                
+
                 const songTitle = songData.name || keyword;
                 const songArtist = songData.artist || "未知歌手";
                 const songAlbum = songData.album || songTitle;
                 const picUrl = songData.cover || songData.pic || "";
-                
+
                 let lyricStr = songData.lyrics?.formatted || songData.lyrics?.combined || songData.lyrics?.original_lyrics || songData.lrc || "[00:00.00] 暂无歌词\n";
 
                 if (playUrl && isValidAudioUrl(playUrl)) {
-                    debugLog(`[残影API] 🎉 成功获取直链！URL: ${playUrl}`);
-                    return [{
-                        id: `canying_${Date.now()}_${n}`,
+                    return {
+                        id: `canying_${Date.now()}_${n}_${Math.random().toString(36).substring(2, 6)}`,
                         name: songTitle,
                         artist: Array.isArray(songArtist) ? songArtist : [songArtist],
                         album: songAlbum,
@@ -941,17 +940,23 @@ async function fetchCanyingClean(keyword) {
                         _directUrl: playUrl,
                         _directPic: picUrl,
                         _directLyric: lyricStr
-                    }];
-                } else {
-                    debugLog(`[残影API] 第 ${n} 首 play_url 无效或为空`);
+                    };
                 }
             }
         } catch (err) {
             debugLog(`[残影API] 第 ${n} 首请求失败: ${err.message}`);
         }
-    }
+        return null;
+    });
 
-    return null;
+    // 并行等待所有异步请求返回
+    const songList = await Promise.all(fetchPromises);
+    
+    // 过滤掉无效请求
+    const results = songList.filter(item => item !== null);
+
+    debugLog(`[残影API] 🎉 成功获取 ${results.length} 首歌曲结果`);
+    return results.length > 0 ? results : null;
 }
 
 const API = {
@@ -1058,9 +1063,9 @@ const API = {
             }
         }
 
-        // ================= 2. 残影 API 浏览器直连模式 =================
+        // ================= 2. 残影 API 浏览器直连模式 (已支持获取多条结果) =================
         if (normalizedSource === "canying") {
-            const canyingResult = await fetchCanyingClean(keyword);
+            const canyingResult = await fetchCanyingClean(keyword, count || 10);
             if (canyingResult) {
                 return canyingResult;
             }
@@ -1173,11 +1178,10 @@ const API = {
         return `${API.baseUrl}?types=lyric&id=${song.lyric_id || song.id}&source=${song.source || "netease"}&s=${signature}`;
     },
 
-    // 🛠️ 关键修复：利用 wsrv.nl 图片代理为第三方 CDN 封面添加 CORS 跨域响应头
+    // 已修复：跨域图片统一添加 wsrv.nl 代理解决 CORS 及图片显示问题
     getPicUrl: (song) => {
         if ((song.source === "qq" || song.source === "kg" || song.source === "kw" || song.source === "kugou" || song.source === "kuwo" || song.source === "canying") && song._directPic) {
             let targetPic = song._directPic;
-            // 只要是 http/https 开头的第三方图片，全部通过跨域代理处理
             if (targetPic && targetPic.startsWith("http")) {
                 targetPic = `https://wsrv.nl/?url=${encodeURIComponent(targetPic)}`;
             }
